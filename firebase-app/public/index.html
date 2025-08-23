@@ -76,6 +76,15 @@
           <button id="connect">Connect</button>
         </div>
         <p id="status">Connecting…</p>
+        <div class="row">
+          <label
+            ><input type="checkbox" id="showRaw" /> Show raw instead of
+            filtered</label
+          >
+          <span style="margin-left: auto"
+            >Signal (p-p, last 2s): <strong id="pp">--</strong></span
+          >
+        </div>
       </div>
 
       <div class="card">
@@ -104,7 +113,7 @@
         off,
       } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js";
 
-      // ===== Firebase config (replace with your project values) =====
+      // ===== Firebase config =====
       const firebaseConfig = {
         apiKey: "AIzaSyBJkfaMqeF4VOD1RKiSaEQoSLjlRGT2UKs",
         authDomain: "ecg-monitor-ohid.firebaseapp.com",
@@ -168,16 +177,22 @@
       const bpmEl = document.getElementById("bpm");
       const condEl = document.getElementById("cond");
       const statusEl = document.getElementById("status");
+      const showRawEl = document.getElementById("showRaw");
+      const ppEl = document.getElementById("pp");
 
-      // ===== R-peak detection (improved) =====
-      let peakTimes = []; // absolute timestamps (ms)
-      const fs = 250; // sampling rate (adjust if different)
-      const threshold = 600; // ADC counts threshold
-      const refractory = 0.25 * fs; // ~250ms refractory
+      // ===== R-peak detection =====
+      let peakTimes = [];
+      const fs = 250;
+      const threshold = 600;
+      const refractory = 0.25 * fs;
 
-      let sampleCounter = 0; // counts total samples since start
+      let sampleCounter = 0;
 
       function processECGChunk(samples) {
+        // compute p-p over last ~2s
+        const seg = ecgData.slice(-fs * 2);
+        ppEl.textContent = peakToPeak(seg);
+
         for (let i = 1; i < samples.length - 1; i++) {
           const s = samples[i];
           if (s > threshold && s > samples[i - 1] && s > samples[i + 1]) {
@@ -185,13 +200,9 @@
               peakTimes.length === 0 ||
               sampleCounter + i - peakTimes[peakTimes.length - 1] > refractory
             ) {
-              // save absolute sample index as peak
               peakTimes.push(sampleCounter + i);
-
-              // keep only last ~10 peaks
               if (peakTimes.length > 10) peakTimes.shift();
 
-              // compute BPM from RR intervals
               if (peakTimes.length >= 2) {
                 const rrIntervals = [];
                 for (let k = 1; k < peakTimes.length; k++) {
@@ -210,7 +221,6 @@
                 }
                 hrChart.update();
 
-                // simple classification
                 let cond = "Normal";
                 if (bpm < 50) cond = "Bradycardia";
                 else if (bpm > 120) cond = "Tachycardia";
@@ -219,7 +229,18 @@
             }
           }
         }
-        sampleCounter += samples.length; // keep track of absolute position
+        sampleCounter += samples.length;
+      }
+
+      // ===== Helper =====
+      function peakToPeak(arr) {
+        let min = Infinity,
+          max = -Infinity;
+        for (const x of arr) {
+          if (x < min) min = x;
+          if (x > max) max = x;
+        }
+        return (max - min).toFixed(0);
       }
 
       // ===== Connection logic =====
@@ -237,15 +258,20 @@
         const q = query(ref(db, `/ecg/${deviceId}`), limitToLast(20));
         unsub = onChildAdded(q, (snap) => {
           const v = snap.val();
-          if (!v || !v.samples) return;
-          for (const s of v.samples) {
+          if (!v) return;
+
+          // choose raw or filtered
+          const samples = showRawEl.checked
+            ? v.samples
+            : v.filtered || v.samples;
+
+          for (const s of samples) {
             ecgData.push(s);
             if (ecgData.length > ECG_LEN) ecgData.shift();
           }
           ecgChart.update();
 
-          // Process new chunk
-          processECGChunk(v.samples);
+          processECGChunk(samples);
         });
       }
       btn.onclick = () => connect(devInput.value.trim());
