@@ -169,25 +169,57 @@
       const condEl = document.getElementById("cond");
       const statusEl = document.getElementById("status");
 
-      // ===== R-peak detection =====
-      let lastPeakTime = null;
-      function detectPeaks(samples, fs = 250) {
-        const threshold = 600; // adjust if needed
-        const refractory = 0.25 * fs; // 250 ms
-        const peaks = [];
+      // ===== R-peak detection (improved) =====
+      let peakTimes = []; // absolute timestamps (ms)
+      const fs = 250; // sampling rate (adjust if different)
+      const threshold = 600; // ADC counts threshold
+      const refractory = 0.25 * fs; // ~250ms refractory
+
+      let sampleCounter = 0; // counts total samples since start
+
+      function processECGChunk(samples) {
         for (let i = 1; i < samples.length - 1; i++) {
-          if (
-            samples[i] > threshold &&
-            samples[i] > samples[i - 1] &&
-            samples[i] > samples[i + 1]
-          ) {
-            if (!lastPeakTime || i - lastPeakTime > refractory) {
-              peaks.push(i);
-              lastPeakTime = i;
+          const s = samples[i];
+          if (s > threshold && s > samples[i - 1] && s > samples[i + 1]) {
+            if (
+              peakTimes.length === 0 ||
+              sampleCounter + i - peakTimes[peakTimes.length - 1] > refractory
+            ) {
+              // save absolute sample index as peak
+              peakTimes.push(sampleCounter + i);
+
+              // keep only last ~10 peaks
+              if (peakTimes.length > 10) peakTimes.shift();
+
+              // compute BPM from RR intervals
+              if (peakTimes.length >= 2) {
+                const rrIntervals = [];
+                for (let k = 1; k < peakTimes.length; k++) {
+                  rrIntervals.push((peakTimes[k] - peakTimes[k - 1]) / fs);
+                }
+                const avgRR =
+                  rrIntervals.reduce((a, b) => a + b, 0) / rrIntervals.length;
+                const bpm = 60 / avgRR;
+
+                bpmEl.textContent = bpm.toFixed(0);
+                hrData.push(bpm);
+                hrChart.data.labels.push("");
+                if (hrData.length > 30) {
+                  hrData.shift();
+                  hrChart.data.labels.shift();
+                }
+                hrChart.update();
+
+                // simple classification
+                let cond = "Normal";
+                if (bpm < 50) cond = "Bradycardia";
+                else if (bpm > 120) cond = "Tachycardia";
+                condEl.textContent = cond;
+              }
             }
           }
         }
-        return peaks;
+        sampleCounter += samples.length; // keep track of absolute position
       }
 
       // ===== Connection logic =====
@@ -213,25 +245,7 @@
           ecgChart.update();
 
           // Process new chunk
-          const peaks = detectPeaks(v.samples, v.sr || 250);
-          if (peaks.length >= 2) {
-            const rr = (peaks[peaks.length - 1] - peaks[0]) / (v.sr || 250); // seconds
-            const bpm = 60 / rr;
-            bpmEl.textContent = bpm.toFixed(0);
-            hrData.push(bpm);
-            hrChart.data.labels.push("");
-            if (hrData.length > 30) {
-              hrData.shift();
-              hrChart.data.labels.shift();
-            }
-            hrChart.update();
-
-            // Simple conditions
-            let cond = "Normal";
-            if (bpm < 50) cond = "Bradycardia";
-            else if (bpm > 120) cond = "Tachycardia";
-            condEl.textContent = cond;
-          }
+          processECGChunk(v.samples);
         });
       }
       btn.onclick = () => connect(devInput.value.trim());
