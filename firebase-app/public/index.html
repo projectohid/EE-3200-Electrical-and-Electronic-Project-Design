@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ECG Live — Firebase</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      body {
+        font-family: system-ui, Segoe UI, Roboto, Arial;
+        margin: 0;
+        padding: 16px;
+      }
+      #card {
+        max-width: 900px;
+        margin: auto;
+      }
+      canvas {
+        width: 100%;
+        height: 360px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .row > * {
+        flex: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="card">
+      <h2>ECG — <span id="dev">esp32-ecg-01</span></h2>
+      <div class="row">
+        <label>Device ID:</label>
+        <input id="deviceId" value="esp32-ecg-01" />
+        <button id="connect">Connect</button>
+      </div>
+      <canvas id="ecg"></canvas>
+      <p id="status">Connecting…</p>
+    </div>
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js";
+      import {
+        getDatabase,
+        ref,
+        query,
+        limitToLast,
+        onChildAdded,
+        off,
+      } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js";
+
+      const firebaseConfig = {
+        apiKey: "AIzaSyBJkfaMqeF4VOD1RKiSaEQoSLjlRGT2UKs",
+        authDomain: "ecg-monitor-ohid.firebaseapp.com",
+        databaseURL:
+          "https://ecg-monitor-ohid-default-rtdb.asia-southeast1.firebasedatabase.app",
+        projectId: "ecg-monitor-ohid",
+        storageBucket: "ecg-monitor-ohid.firebasestorage.app",
+        messagingSenderId: "743049129470",
+        appId: "1:743049129470:web:4d6230ea0c98d3500424af",
+        measurementId: "G-X21ZR8T2QK",
+      };
+
+      const app = initializeApp(firebaseConfig);
+      const db = getDatabase(app);
+
+      const ctx = document.getElementById("ecg").getContext("2d");
+      const N = 10 * 250; // show ~10 s at 250 Hz
+      const data = Array(N).fill(0);
+      const chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: Array(N).fill(""),
+          datasets: [{ data, pointRadius: 0, borderWidth: 1, tension: 0 }],
+        },
+        options: {
+          animation: false,
+          scales: {
+            x: { display: false },
+            y: { title: { display: true, text: "counts" } },
+          },
+        },
+      });
+
+      const status = document.getElementById("status");
+      const devSpan = document.getElementById("dev");
+      const devInput = document.getElementById("deviceId");
+      const btn = document.getElementById("connect");
+
+      let unsub = null;
+      function connect(deviceId) {
+        if (unsub) {
+          off(unsub);
+          unsub = null;
+        }
+        devSpan.textContent = deviceId;
+        status.textContent = "Listening…";
+        const base = ref(db, `/ecg/${deviceId}`);
+        const q = query(base, limitToLast(20)); // last 20 seconds chunks
+        unsub = onChildAdded(q, (snap) => {
+          const v = snap.val();
+          if (!v || !v.samples) return;
+          // Append new samples; keep a rolling window
+          for (const s of v.samples) {
+            data.push(s);
+            if (data.length > N) data.shift();
+          }
+          chart.update();
+        });
+      }
+
+      btn.onclick = () => connect(devInput.value.trim());
+      connect(devInput.value.trim());
+    </script>
+  </body>
+</html>
