@@ -3,43 +3,96 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ECG Live — Firebase</title>
+    <title>ECG Live Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
       body {
-        font-family: system-ui, Segoe UI, Roboto, Arial;
+        font-family: "Segoe UI", Roboto, Arial;
+        background: #f9f9fb;
         margin: 0;
+      }
+      header {
+        background: #1a73e8;
+        color: white;
         padding: 16px;
       }
-      #card {
-        max-width: 900px;
-        margin: auto;
+      h1 {
+        margin: 0;
+        font-size: 1.5em;
       }
-      canvas {
-        width: 100%;
-        height: 360px;
+      #container {
+        max-width: 1000px;
+        margin: 24px auto;
+        padding: 16px;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        padding: 16px;
+        margin-bottom: 20px;
       }
       .row {
         display: flex;
-        gap: 8px;
         align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
       }
-      .row > * {
-        flex: 0;
+      label {
+        font-weight: bold;
+      }
+      input,
+      button {
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+      }
+      button {
+        background: #1a73e8;
+        color: white;
+        border: none;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1558b0;
+      }
+      .metrics {
+        display: flex;
+        gap: 20px;
+        font-size: 1.2em;
+      }
+      .metric span {
+        font-weight: bold;
       }
     </style>
   </head>
   <body>
-    <div id="card">
-      <h2>ECG — <span id="dev">esp32-ecg-01</span></h2>
-      <div class="row">
-        <label>Device ID:</label>
-        <input id="deviceId" value="esp32-ecg-01" />
-        <button id="connect">Connect</button>
+    <header><h1>Wireless ECG Dashboard</h1></header>
+    <div id="container">
+      <div class="card">
+        <div class="row">
+          <label>Device ID:</label>
+          <input id="deviceId" value="esp32-ecg-01" />
+          <button id="connect">Connect</button>
+        </div>
+        <p id="status">Connecting…</p>
       </div>
-      <canvas id="ecg"></canvas>
-      <p id="status">Connecting…</p>
+
+      <div class="card">
+        <h2>Live ECG</h2>
+        <canvas id="ecg" height="100"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Heart Rate</h2>
+        <div class="metrics">
+          <div class="metric">BPM: <span id="bpm">--</span></div>
+          <div class="metric">Condition: <span id="cond">--</span></div>
+        </div>
+        <canvas id="hr" height="100"></canvas>
+      </div>
     </div>
+
     <script type="module">
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js";
       import {
@@ -51,6 +104,7 @@
         off,
       } from "https://www.gstatic.com/firebasejs/10.12.3/firebase-database.js";
 
+      // ===== Firebase config (replace with your project values) =====
       const firebaseConfig = {
         apiKey: "AIzaSyBJkfaMqeF4VOD1RKiSaEQoSLjlRGT2UKs",
         authDomain: "ecg-monitor-ohid.firebaseapp.com",
@@ -66,51 +120,120 @@
       const app = initializeApp(firebaseConfig);
       const db = getDatabase(app);
 
-      const ctx = document.getElementById("ecg").getContext("2d");
-      const N = 10 * 250; // show ~10 s at 250 Hz
-      const data = Array(N).fill(0);
-      const chart = new Chart(ctx, {
+      // ===== Charts =====
+      const ECG_LEN = 10 * 250;
+      const ecgData = Array(ECG_LEN).fill(0);
+      const ecgChart = new Chart(document.getElementById("ecg"), {
         type: "line",
         data: {
-          labels: Array(N).fill(""),
-          datasets: [{ data, pointRadius: 0, borderWidth: 1, tension: 0 }],
+          labels: Array(ECG_LEN).fill(""),
+          datasets: [
+            {
+              data: ecgData,
+              borderColor: "#1a73e8",
+              borderWidth: 1,
+              pointRadius: 0,
+            },
+          ],
         },
         options: {
           animation: false,
           scales: {
             x: { display: false },
-            y: { title: { display: true, text: "counts" } },
+            y: { title: { display: true, text: "ECG (counts)" } },
           },
         },
       });
 
-      const status = document.getElementById("status");
-      const devSpan = document.getElementById("dev");
+      const hrData = [];
+      const hrChart = new Chart(document.getElementById("hr"), {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [
+            {
+              data: hrData,
+              borderColor: "#e91e63",
+              borderWidth: 2,
+              pointRadius: 3,
+            },
+          ],
+        },
+        options: {
+          animation: false,
+          scales: { y: { title: { display: true, text: "BPM" } } },
+        },
+      });
+
+      const bpmEl = document.getElementById("bpm");
+      const condEl = document.getElementById("cond");
+      const statusEl = document.getElementById("status");
+
+      // ===== R-peak detection =====
+      let lastPeakTime = null;
+      function detectPeaks(samples, fs = 250) {
+        const threshold = 600; // adjust if needed
+        const refractory = 0.25 * fs; // 250 ms
+        const peaks = [];
+        for (let i = 1; i < samples.length - 1; i++) {
+          if (
+            samples[i] > threshold &&
+            samples[i] > samples[i - 1] &&
+            samples[i] > samples[i + 1]
+          ) {
+            if (!lastPeakTime || i - lastPeakTime > refractory) {
+              peaks.push(i);
+              lastPeakTime = i;
+            }
+          }
+        }
+        return peaks;
+      }
+
+      // ===== Connection logic =====
       const devInput = document.getElementById("deviceId");
       const btn = document.getElementById("connect");
-
       let unsub = null;
+
       function connect(deviceId) {
         if (unsub) {
           off(unsub);
           unsub = null;
         }
-        devSpan.textContent = deviceId;
-        status.textContent = "Listening…";
-        const base = ref(db, `/ecg/${deviceId}`);
-        const q = query(base, limitToLast(20)); // last 20 seconds chunks
+        statusEl.textContent = `Listening to ${deviceId}…`;
+
+        const q = query(ref(db, `/ecg/${deviceId}`), limitToLast(20));
         unsub = onChildAdded(q, (snap) => {
           const v = snap.val();
           if (!v || !v.samples) return;
-          // Append new samples; keep a rolling window
           for (const s of v.samples) {
-            data.push(s);
-            if (data.length > N) data.shift();
+            ecgData.push(s);
+            if (ecgData.length > ECG_LEN) ecgData.shift();
           }
-          chart.update();
+          ecgChart.update();
+
+          // Process new chunk
+          const peaks = detectPeaks(v.samples, v.sr || 250);
+          if (peaks.length >= 2) {
+            const rr = (peaks[peaks.length - 1] - peaks[0]) / (v.sr || 250); // seconds
+            const bpm = 60 / rr;
+            bpmEl.textContent = bpm.toFixed(0);
+            hrData.push(bpm);
+            hrChart.data.labels.push("");
+            if (hrData.length > 30) {
+              hrData.shift();
+              hrChart.data.labels.shift();
+            }
+            hrChart.update();
+
+            // Simple conditions
+            let cond = "Normal";
+            if (bpm < 50) cond = "Bradycardia";
+            else if (bpm > 120) cond = "Tachycardia";
+            condEl.textContent = cond;
+          }
         });
       }
-
       btn.onclick = () => connect(devInput.value.trim());
       connect(devInput.value.trim());
     </script>
